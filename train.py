@@ -13,7 +13,7 @@ from backbone import pyramidnet as PYRM
 from my_utils.compute_utils import *
 from my_utils import aug_utils
 import numpy as np
-
+from my_utils.grid import GridMask
 import warnings
 
 warnings.filterwarnings("ignore")
@@ -25,6 +25,11 @@ model_names = sorted(name for name in models.__dict__
 parser = argparse.ArgumentParser(description='Cutmix PyTorch CIFAR-10, CIFAR-100 and ImageNet-1k Training')
 parser.add_argument('--net_type', default='pyramidnet', type=str,
                     help='networktype: resnet, and pyamidnet')
+parser.add_argument('--arch', '-a', metavar='ARCH', default='resnet18',
+                    choices=model_names,
+                    help='model architecture: ' +
+                    ' | '.join(model_names) +
+                    ' (default: resnet18)')
 parser.add_argument('-j', '--workers', default=4, type=int, metavar='N',
                     help='number of data loading workers (default: 4)')
 parser.add_argument('--epochs', default=90, type=int, metavar='N',
@@ -55,12 +60,33 @@ parser.add_argument('--beta', default=0, type=float,
                     help='hyperparameter beta')
 parser.add_argument('--cutmix_prob', default=0, type=float,
                     help='cutmix probability')
-
+parser.add_argument('--grid', action='store_true', default=False,
+        help='apply grid')
+parser.add_argument('--d1', type=int, default=96,
+        help='d1')
+parser.add_argument('--d2', type=int, default=224,
+        help='d2')
+parser.add_argument('--rotate', type=int, default=360,
+        help='rotate the mask')
+parser.add_argument('--ratio', type=float, default=0.6,
+        help='ratio')
+parser.add_argument('--mode', type=int, default=1,
+        help='GridMask (1) or revised GridMask (0)')
+parser.add_argument('--prob', type=float, default=0.8,
+        help='max prob')
+parser.add_argument('--st_epochs', type=float, default=240,
+        help='epoch when archive max prob')
+parser.add_argument('--save_dir', type=str, default='')
+parser.add_argument('--start-epoch', default=0, type=int, metavar='N',
+                    help='manual epoch number (useful on restarts)')
 parser.set_defaults(bottleneck=True)
 parser.set_defaults(verbose=True)
 
 best_err1 = 100
 best_err5 = 100
+
+if args.grid:
+    grid = GridMask(args.d1, args.d2, args.rotate, args.ratio, args.mode, args.prob)
 
 
 def main():
@@ -148,13 +174,22 @@ def main():
         raise Exception('unknown dataset: {}'.format(args.dataset))
 
     print("=> creating model '{}'".format(args.net_type))
-    if args.net_type == 'resnet':
-        model = RN.ResNet(args.dataset, args.depth, numberofclass, args.bottleneck)  # for ResNet
-    elif args.net_type == 'pyramidnet':
-        model = PYRM.PyramidNet(args.dataset, args.depth, args.alpha, numberofclass,
-                                args.bottleneck)
+    # create model
+    if args.arch is not None:
+        if args.pretrained:
+            print("=> using pre-trained model '{}'".format(args.arch))
+            model = models.__dict__[args.arch](pretrained=True)
+        else:
+            print("=> creating model '{}'".format(args.arch))
+            model = models.__dict__[args.arch]()
     else:
-        raise Exception('unknown network architecture: {}'.format(args.net_type))
+        if args.net_type == 'resnet':
+            model = RN.ResNet(args.dataset, args.depth, numberofclass, args.bottleneck)  # for ResNet
+        elif args.net_type == 'pyramidnet':
+            model = PYRM.PyramidNet(args.dataset, args.depth, args.alpha, numberofclass,
+                                    args.bottleneck)
+        else:
+            raise Exception('unknown network architecture: {}'.format(args.net_type))
 
     model = torch.nn.DataParallel(model).cuda()
 
@@ -173,7 +208,8 @@ def main():
     for epoch in range(0, args.epochs):
 
         adjust_learning_rate(optimizer, epoch,args)
-
+        if args.grid:
+            grid.set_prob(epoch, args.st_epochs)
         # train for one epoch
         train_loss = train(train_loader, model, criterion, optimizer, epoch)
 
@@ -232,6 +268,10 @@ def train(train_loader, model, criterion, optimizer, epoch):
             # compute output
             output = model(input)
             loss = criterion(output, target_a) * lam + criterion(output, target_b) * (1. - lam)
+        elif args.grid:
+            input = grid(input)
+            output = model(input)
+            loss = criterion(output, target)
         else:
             # compute output
             output = model(input)
