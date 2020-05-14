@@ -79,6 +79,12 @@ parser.add_argument('--st_epochs', type=float, default=240,
 parser.add_argument('--save_dir', type=str, default='')
 parser.add_argument('--start-epoch', default=0, type=int, metavar='N',
                     help='manual epoch number (useful on restarts)')
+parser.add_argument('--cutout', action='store_true', default=False,
+                    help='apply cutout')
+parser.add_argument('--n_holes', type=int, default=1,
+                    help='number of holes to cut out from image')
+parser.add_argument('--length', type=int, default=16,
+                    help='length of the holes')
 parser.set_defaults(bottleneck=True)
 parser.set_defaults(verbose=True)
 
@@ -92,6 +98,8 @@ if args.grid:
 def main():
     global args, best_err1, best_err5
     args = parser.parse_args()
+    # if args.cutout:
+    #     train_transform.transforms.append(Cutout(n_holes=args.n_holes, length=args.length))
 
     if args.dataset.startswith('cifar'):
         normalize = transforms.Normalize(mean=[x / 255.0 for x in [125.3, 123.0, 113.9]],
