@@ -25,16 +25,17 @@ model_names = sorted(name for name in models.__dict__
 parser = argparse.ArgumentParser(description='Cutmix PyTorch CIFAR-10, CIFAR-100 and ImageNet-1k Training')
 parser.add_argument('--net_type', default='pyramidnet', type=str,
                     help='networktype: resnet, and pyamidnet')
-parser.add_argument('--arch', '-a', metavar='ARCH', default='resnet18',
+parser.add_argument('--arch', '-a', metavar='ARCH', default='none',
                     choices=model_names,
                     help='model architecture: ' +
                     ' | '.join(model_names) +
                     ' (default: resnet18)')
+parser.add_argument('--pretrained',action='store_true', default=False)
 parser.add_argument('-j', '--workers', default=4, type=int, metavar='N',
                     help='number of data loading workers (default: 4)')
 parser.add_argument('--epochs', default=90, type=int, metavar='N',
                     help='number of total epochs to run')
-parser.add_argument('-b', '--batch_size', default=128, type=int,
+parser.add_argument('-b', '--batch_size', default=256, type=int,
                     metavar='N', help='mini-batch size (default: 256)')
 parser.add_argument('--lr', '--learning-rate', default=0.1, type=float,
                     metavar='LR', help='initial learning rate')
@@ -46,13 +47,15 @@ parser.add_argument('--print-freq', '-p', default=1, type=int,
                     metavar='N', help='print frequency (default: 10)')
 parser.add_argument('--depth', default=32, type=int,
                     help='depth of the network (default: 32)')
+parser.add_argument('--resume', default='', type=str, metavar='PATH',
+                    help='path to latest checkpoint (default: none)')
 parser.add_argument('--no-bottleneck', dest='bottleneck', action='store_false',
                     help='to use basicblock for CIFAR datasets (default: bottleneck)')
 parser.add_argument('--dataset', dest='dataset', default='imagenet', type=str,
                     help='dataset (options: cifar10, cifar100, and imagenet)')
 parser.add_argument('--no-verbose', dest='verbose', action='store_false',
                     help='to print the status at every iteration')
-parser.add_argument('--alpha', default=300, type=float,
+parser.add_argument('--alpha', default=240, type=float,
                     help='number of new channel increases per depth (default: 300)')
 parser.add_argument('--expname', default='TEST', type=str,
                     help='name of experiment')
@@ -76,8 +79,7 @@ parser.add_argument('--prob', type=float, default=0.8,
         help='max prob')
 parser.add_argument('--st_epochs', type=float, default=240,
         help='epoch when archive max prob')
-parser.add_argument('--save_dir', type=str, default='')
-parser.add_argument('--start-epoch', default=0, type=int, metavar='N',
+parser.add_argument('--start_epoch', default=0, type=int, metavar='N',
                     help='manual epoch number (useful on restarts)')
 parser.add_argument('--cutout', action='store_true', default=False,
                     help='apply cutout')
@@ -87,7 +89,7 @@ parser.add_argument('--length', type=int, default=16,
                     help='length of the holes')
 parser.set_defaults(bottleneck=True)
 parser.set_defaults(verbose=True)
-
+args = parser.parse_args()
 best_err1 = 100
 best_err5 = 100
 
@@ -97,7 +99,7 @@ if args.grid:
 
 def main():
     global args, best_err1, best_err5
-    args = parser.parse_args()
+
     # if args.cutout:
     #     train_transform.transforms.append(Cutout(n_holes=args.n_holes, length=args.length))
 
@@ -119,7 +121,7 @@ def main():
 
         if args.dataset == 'cifar100':
             train_loader = torch.utils.data.DataLoader(
-                datasets.CIFAR100('../data', train=True, download=True, transform=transform_train),
+                datasets.CIFAR100('../data', train=True, download=False, transform=transform_train),
                 batch_size=args.batch_size, shuffle=True, num_workers=args.workers, pin_memory=True)
             val_loader = torch.utils.data.DataLoader(
                 datasets.CIFAR100('../data', train=False, transform=transform_test),
@@ -181,9 +183,9 @@ def main():
     else:
         raise Exception('unknown dataset: {}'.format(args.dataset))
 
-    print("=> creating model '{}'".format(args.net_type))
+
     # create model
-    if args.arch is not None:
+    if args.arch != 'none':
         if args.pretrained:
             print("=> using pre-trained model '{}'".format(args.arch))
             model = models.__dict__[args.arch](pretrained=True)
@@ -198,11 +200,12 @@ def main():
                                     args.bottleneck)
         else:
             raise Exception('unknown network architecture: {}'.format(args.net_type))
-
+        print("=> creating model '{}'".format(args.net_type))
     model = torch.nn.DataParallel(model).cuda()
 
     print(model)
     print('the number of model parameters: {}'.format(sum([p.data.nelement() for p in model.parameters()])))
+
 
     # define loss function (criterion) and optimizer
     criterion = nn.CrossEntropyLoss().cuda()
@@ -210,10 +213,23 @@ def main():
     optimizer = torch.optim.SGD(model.parameters(), args.lr,
                                 momentum=args.momentum,
                                 weight_decay=args.weight_decay, nesterov=True)
-
+    if args.resume:
+        # Use a local scope to avoid dangling references
+        def resume():
+            if os.path.isfile(args.resume):
+                print("=> loading checkpoint '{}'".format(args.resume))
+                checkpoint = torch.load(args.resume, map_location = lambda storage, loc: storage.cuda())
+                args.start_epoch = checkpoint['epoch']
+                model.load_state_dict(checkpoint['state_dict'])
+                optimizer.load_state_dict(checkpoint['optimizer'])
+                print("=> loaded checkpoint '{}' (epoch {})"
+                      .format(args.resume, checkpoint['epoch']))
+            else:
+                print("=> no checkpoint found at '{}'".format(args.resume))
+        resume()
     cudnn.benchmark = True
 
-    for epoch in range(0, args.epochs):
+    for epoch in range(args.start_epoch, args.epochs):
 
         adjust_learning_rate(optimizer, epoch,args)
         if args.grid:
@@ -233,12 +249,11 @@ def main():
         print('Current best accuracy (top-1 and 5 error):', best_err1, best_err5)
         save_checkpoint({
             'epoch': epoch,
-            'arch': args.net_type,
             'state_dict': model.state_dict(),
             'best_err1': best_err1,
             'best_err5': best_err5,
             'optimizer': optimizer.state_dict(),
-        }, is_best)
+        }, is_best,args)
 
     print('Best accuracy (top-1 and 5 error):', best_err1, best_err5)
 
